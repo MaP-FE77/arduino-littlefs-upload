@@ -114,8 +114,8 @@ function fancyParseInt(str: string) : number {
 }
 
 // Execute a command and display it's output in the terminal
-async function runCommand(exe : string, opts : any[]): Promise<{ code: number; stderr: string }> {
-    const cmd = spawn(exe, opts);
+async function runCommand(exe : string, opts : any[], cwd? : string): Promise<{ code: number; stderr: string }> {
+    const cmd = spawn(exe, opts, { cwd });
     let stderrBuf = '';
     cmd.stdout.on('data', function(chunk) {
         writeEmitter.fire(String(chunk).replace(/\n/g, "\r\n"));
@@ -251,18 +251,65 @@ function uniquePath(destDir: string, fileName: string): string {
     return destPath;
 }
 
+// MARK: Pre-build script — selected per sketch, run before mklittlefs
+function preBuildKey(sketchPath: string): string {
+    return `preBuildScript:${sketchPath}`;
+}
+
+function getPreBuildScript(state: vscode.Memento, sketchPath: string | undefined): string | undefined {
+    if (!sketchPath) { return undefined; }
+    const script = state.get<string>(preBuildKey(sketchPath));
+    return script && fs.existsSync(script) ? script : undefined;
+}
+
+// Pick interpreter from the script extension
+function scriptCommand(script: string, args: string[]): { exe: string; opts: string[] } {
+    const win = platform() === 'win32';
+    switch (path.extname(script).toLowerCase()) {
+        case '.ps1':
+            return { exe: win ? 'powershell.exe' : 'pwsh', opts: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args] };
+        case '.bat':
+        case '.cmd':
+            return { exe: 'cmd.exe', opts: ['/c', script, ...args] };
+        case '.sh':
+            return { exe: 'bash', opts: [script, ...args] };
+        case '.py':
+            return { exe: win ? 'python' : 'python3', opts: [script, ...args] };
+        case '.js':
+            return { exe: 'node', opts: [script, ...args] };
+        default:
+            return { exe: script, opts: args };
+    }
+}
+
 class LittleFSViewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _watcher?: vscode.FileSystemWatcher;
     private _getSketchPath: () => string | undefined;
+    private _state: vscode.Memento;
 
-    constructor(getSketchPath: () => string | undefined) {
+    constructor(getSketchPath: () => string | undefined, state: vscode.Memento) {
         this._getSketchPath = getSketchPath;
+        this._state = state;
+    }
+
+    // MARK: Send selected pre-build script to webview
+    sendScript() {
+        if (!this._view) { return; }
+        const sketchPath = this._getSketchPath();
+        const script = getPreBuildScript(this._state, sketchPath);
+        let name = '';
+        if (script) {
+            const rel = sketchPath ? path.relative(sketchPath, script) : script;
+            name = rel.startsWith('..') || path.isAbsolute(rel) ? script : rel;
+        }
+        this._view.webview.postMessage({ command: 'scriptState', name, full: script || '' });
     }
 
     // MARK: Send file listing to webview
     refreshFiles() {
         if (!this._view) { return; }
+        this.sendScript();
         const sketchPath = this._getSketchPath();
         if (!sketchPath) {
             this._view.webview.postMessage({ command: 'fileList', files: [], dataPath: '' });
@@ -297,6 +344,25 @@ class LittleFSViewProvider implements vscode.WebviewViewProvider {
                 vscode.commands.executeCommand(`arduino-${EXT_TAG}-upload.build${EXT_NAME}`);
             } else if (msg.command === 'refresh') {
                 this.refreshFiles();
+            } else if (msg.command === 'selectScript') {
+                // MARK: Select pre-build script
+                const sketchPath = this._getSketchPath();
+                if (!sketchPath) { vscode.window.showErrorMessage('No sketch open.'); return; }
+                const uris = await vscode.window.showOpenDialog({
+                    canSelectMany: false,
+                    defaultUri: vscode.Uri.file(sketchPath),
+                    openLabel: 'Use as pre-build script',
+                    filters: { 'Scripts': ['ps1', 'bat', 'cmd', 'sh', 'py', 'js'], 'All files': ['*'] }
+                });
+                if (uris && uris.length > 0) {
+                    await this._state.update(preBuildKey(sketchPath), uris[0].fsPath);
+                    this.sendScript();
+                }
+            } else if (msg.command === 'clearScript') {
+                const sketchPath = this._getSketchPath();
+                if (!sketchPath) { return; }
+                await this._state.update(preBuildKey(sketchPath), undefined);
+                this.sendScript();
             } else if (msg.command === 'addFiles') {
                 const sketchPath = this._getSketchPath();
                 if (!sketchPath) { vscode.window.showErrorMessage('No sketch open.'); return; }
@@ -497,7 +563,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     // MARK: Register sidebar first (before Arduino API check so icon always appears)
-    const viewProvider = new LittleFSViewProvider(() => getArduinoContext()?.sketchPath);
+    const viewProvider = new LittleFSViewProvider(() => getArduinoContext()?.sketchPath, context.globalState);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(`${EXT_TAG}-actions`, viewProvider, {
         webviewOptions: { retainContextWhenHidden: true }
     }));
@@ -592,7 +658,10 @@ async function doOperation(context: vscode.ExtensionContext, arduinoContext: Ard
     // Need to have a data folder present, or this isn't gonna work...
     let dataFolder = arduinoContext.sketchPath + path.sep + "data";
     writeEmitter.fire(blue("   Data Path: ") + green(dataFolder) + "\r\n");
-    if (!fs.existsSync(dataFolder)) {
+    // If data/ is missing or empty, the image is built from web/ instead
+    const webFolder = arduinoContext.sketchPath + path.sep + "web";
+    const isEmptyDir = (dir: string) => !fs.existsSync(dir) || fs.readdirSync(dir).length === 0;
+    if (!fs.existsSync(dataFolder) && !fs.existsSync(webFolder)) {
         writeEmitter.fire(red("\r\n\r\nERROR: No data folder found at " + dataFolder) + "\r\n");
         return;
     }
@@ -800,7 +869,59 @@ async function doOperation(context: vscode.ExtensionContext, arduinoContext: Ard
         writeEmitter.fire(blue("Output File:  ") + green(imageFile) + "\r\n");
     }
 
-    let buildOpts =  ["-c", dataFolder, "-p", String(page), "-b", String(blocksize), "-s", String(fsEnd - fsStart), imageFile];
+    // Optional pre-build script selected in the sidebar
+    const preBuild = getPreBuildScript(context.globalState, arduinoContext.sketchPath);
+
+    // Empty data/ before each build, but only when something will regenerate it (script or web/)
+    if (fs.existsSync(dataFolder)) {
+        if (preBuild || !isEmptyDir(webFolder)) {
+            writeEmitter.fire(bold("\r\nClearing data/\r\n"));
+            try {
+                for (const entry of fs.readdirSync(dataFolder)) {
+                    fs.rmSync(path.join(dataFolder, entry), { recursive: true, force: true });
+                }
+            } catch (err: any) {
+                writeEmitter.fire(red("\r\n\r\nERROR:  Unable to clear data/: " + String(err?.message ?? err) + "\r\n\r\n"));
+                return;
+            }
+        } else {
+            writeEmitter.fire(blue("     Notice: ") + green("data/ not cleared (no pre-build script and web/ is empty)") + "\r\n");
+        }
+    }
+
+    if (preBuild) {
+        const { exe, opts } = scriptCommand(preBuild, [dataFolder, String(arduinoContext.sketchPath), doUpload ? "upload" : "build"]);
+        writeEmitter.fire(bold("\r\nRunning pre-build script\r\n"));
+        writeEmitter.fire(blue("Command Line: ") + green(exe + " " + opts.join(" ")) + "\r\n");
+        const scriptExit = (await runCommand(exe, opts, arduinoContext.sketchPath)).code;
+        if (scriptExit) {
+            writeEmitter.fire(red("\r\n\r\nERROR:  Pre-build script failed, error code: " + String(scriptExit) + "\r\n\r\n"));
+            return;
+        }
+    } else if (fs.existsSync(webFolder) && !isEmptyDir(webFolder)) {
+        // No script selected: plain copy of web/ into data/ (existing files are overwritten)
+        writeEmitter.fire(bold("\r\nCopying web/ to data/\r\n"));
+        try {
+            fs.cpSync(webFolder, dataFolder, { recursive: true, force: true });
+        } catch (err: any) {
+            writeEmitter.fire(red("\r\n\r\nERROR:  Copy failed: " + String(err?.message ?? err) + "\r\n\r\n"));
+            return;
+        }
+    }
+
+    // Decided after the pre-build script, which may fill data/
+    let sourceFolder = dataFolder;
+    if (isEmptyDir(dataFolder)) {
+        if (fs.existsSync(webFolder) && !isEmptyDir(webFolder)) {
+            sourceFolder = webFolder;
+            writeEmitter.fire(blue("  Fallback:   ") + green("data/ is empty, using " + webFolder) + "\r\n");
+        } else if (!fs.existsSync(dataFolder)) {
+            writeEmitter.fire(red("\r\n\r\nERROR: No data folder found at " + dataFolder + " and web/ is empty\r\n"));
+            return;
+        }
+    }
+
+    let buildOpts =  ["-c", sourceFolder, "-p", String(page), "-b", String(blocksize), "-s", String(fsEnd - fsStart), imageFile];
 
     // All mklittlefs take the same options, so run in common
     writeEmitter.fire(bold(`\r\nBuilding ${EXT_NAME} filesystem\r\n`));
@@ -900,8 +1021,8 @@ async function doOperation(context: vscode.ExtensionContext, arduinoContext: Ard
                 espTool = espToolPath + path.sep + espTool;
             }
             uploadOpts = ["--chip", esp32variant, "--port", serialPort, "--baud", String(uploadSpeed),
-                "--before", "default-reset", "--after", "hard-reset", "write-flash", "-z",
-                "--flash-mode", flashMode, "--flash-freq", flashFreq, "--flash-size", "detect", String(fsStart), imageFile];
+                "--before", "default_reset", "--after", "hard_reset", "write_flash", "-z",
+                "--flash_mode", flashMode, "--flash_freq", flashFreq, "--flash_size", "detect", String(fsStart), imageFile];
             if ((platform() === 'win32') || (platform() === 'darwin')) {
                 cmdApp = espTool + extEspTool; // Have binary EXE on Mac/Windows
             } else {

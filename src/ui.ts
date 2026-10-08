@@ -53,6 +53,28 @@ export function getWebviewHtml(): string {
     opacity: 0.8;
   }
   .icon { font-size: 14px; line-height: 1; }
+  .script-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 10px;
+    font-size: 11px;
+  }
+  .script-label { opacity: 0.7; flex-shrink: 0; }
+  .script-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.9;
+    cursor: pointer;
+    padding: 3px 6px;
+    border-radius: 3px;
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-widget-border, transparent);
+  }
+  .script-name.none { opacity: 0.5; font-style: italic; }
+  .script-name:hover { opacity: 1; }
   .section-header {
     display: flex;
     align-items: center;
@@ -175,6 +197,12 @@ export function getWebviewHtml(): string {
     <span class="icon" style="font-size:12px;">&#128230;</span> Build
   </button>
 
+  <div class="script-row" title="Script run before building the LittleFS image">
+    <span class="script-label">Pre-build:</span>
+    <span class="script-name none" id="scriptName" onclick="selectScript()">None (click to select)</span>
+    <button class="icon-btn" id="scriptClear" onclick="clearScript()" title="Do not run any script" style="display:none">&#10005;</button>
+  </div>
+
   <div class="section-header">
     <span>data/</span>
     <div class="section-actions">
@@ -194,6 +222,8 @@ export function getWebviewHtml(): string {
     const vscode = acquireVsCodeApi();
     function upload() { vscode.postMessage({command: 'upload'}); }
     function build() { vscode.postMessage({command: 'build'}); }
+    function selectScript() { vscode.postMessage({command: 'selectScript'}); }
+    function clearScript() { vscode.postMessage({command: 'clearScript'}); }
     function refresh() { vscode.postMessage({command: 'refresh'}); }
     function addFiles(targetDir) { vscode.postMessage({command: 'addFiles', targetDir: targetDir || ''}); }
     function addFolder(targetDir) { vscode.postMessage({command: 'addFolder', targetDir: targetDir || ''}); }
@@ -237,7 +267,13 @@ export function getWebviewHtml(): string {
     // MARK: Receive file listing from extension
     window.addEventListener('message', event => {
       const msg = event.data;
-      if (msg.command === 'fileList') {
+      if (msg.command === 'scriptState') {
+        const el = document.getElementById('scriptName');
+        el.textContent = msg.name || 'None (click to select)';
+        el.title = msg.full || 'Select a script to run before the build';
+        el.classList.toggle('none', !msg.name);
+        document.getElementById('scriptClear').style.display = msg.name ? '' : 'none';
+      } else if (msg.command === 'fileList') {
         const list = document.getElementById('fileList');
         if (!msg.files || msg.files.length === 0) {
           list.innerHTML = '<li class="empty-msg">No files in data/ folder</li>';

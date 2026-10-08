@@ -2,7 +2,7 @@
 
 A sidebar plugin for **Arduino IDE 2.x** that builds and uploads LittleFS filesystem images to ESP32, ESP8266, and RP2040 boards.
 
-Fork of [earlephilhower/arduino-littlefs-upload](https://github.com/earlephilhower/arduino-littlefs-upload) — rebuilt with a sidebar UI, file manager, and smart serial monitor handling.
+Fork of [HamzaYslmn/arduino-littlefs-upload](https://github.com/HamzaYslmn/arduino-littlefs-upload) — adding pre-build hook.
 
 ![Sidebar Panel](image/show.png)
 
@@ -20,7 +20,7 @@ Fork of [earlephilhower/arduino-littlefs-upload](https://github.com/earlephilhow
 
 ## Installation
 
-1. Download the `.vsix` file from [Releases](https://github.com/HamzaYslmn/arduino-littlefs-upload/releases)
+1. Download the `.vsix` file from [Releases](https://github.com/MaP-FE77/arduino-littlefs-upload/releases)
 2. Copy it to:
    - **Windows:** `C:\Users\<username>\.arduinoIDE\plugins\`
    - **macOS/Linux:** `~/.arduinoIDE/plugins/`
